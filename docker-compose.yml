@@ -1,0 +1,176 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sandboxed Algorithmic Judge — Docker Compose Orchestration
+#
+# Services
+#   postgres            — persistent state (submissions table)
+#   redis               — Celery broker + result backend
+#   docker-socket-proxy — tecnativa proxy; exposes only /containers & /images
+#                         to the worker. The raw /var/run/docker.sock is NEVER
+#                         mounted into the api or worker services.
+#   ollama              — local LLM runtime; pulls qwen2.5-coder on first start
+#   api                 — FastAPI gateway (POST /submit, GET /status/{job_id})
+#   worker              — Celery execution worker; launches sibling containers
+#                         via the socket proxy TCP endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-judge}:${POSTGRES_PASSWORD:-judgepass}@postgres:5432/${POSTGRES_DB:-judgedb}
+  REDIS_URL: redis://redis:6379/0
+  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder}
+  SANDBOX_TIMEOUT: ${SANDBOX_TIMEOUT:-5}
+  SANDBOX_BASE_DIR: /tmp/judge_sandboxes
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-judge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-judgepass}
+      POSTGRES_DB: ${POSTGRES_DB:-judgedb}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-judge} -d ${POSTGRES_DB:-judgedb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── Docker Socket Proxy (tecnativa) ───────────────────────────────────────
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.1.2
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      POST: 1
+      DELETE: 1
+      NETWORKS: 0
+      VOLUMES: 0
+      AUTH: 0
+      SECRETS: 0
+      SWARM: 0
+      EXEC: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      PLUGINS: 0
+      SERVICES: 0
+      SESSION: 0
+      SYSTEM: 0
+      TASKS: 0
+      LOG_LEVEL: warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+
+  # ── Ollama (local LLM runtime) ────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/ollama-entrypoint.sh"]
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder}
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 100         # Allows up to ~16 min for model download on slow connections
+      start_period: 30s    # Entrypoint script handles server-ready loop; short grace period is enough
+    networks:
+      - backend
+
+  # ── FastAPI Gateway ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2 --log-level info
+    environment:
+      <<: *common-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - backend
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      celery -A worker.celery_app worker
+        --loglevel=info
+        --concurrency=4
+        --queues=celery
+        --without-heartbeat
+        --without-gossip
+        --without-mingle
+    environment:
+      <<: *common-env
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    volumes:
+      - /tmp/judge_sandboxes:/tmp/judge_sandboxes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    networks:
+      - backend
+      - docker_proxy
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+
+networks:
+  backend:
+    driver: bridge
+  docker_proxy:
+    driver: bridge
+    internal: true
