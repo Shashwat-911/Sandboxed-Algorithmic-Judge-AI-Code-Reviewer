@@ -1,185 +1,141 @@
-"""
-main.py — FastAPI gateway for the Sandboxed Algorithmic Judge.
-
-Endpoints:
-  POST /submit          — Accept a code submission, return a job_id.
-  GET  /status/{job_id} — Poll execution status and results.
-  GET  /health          — Liveness probe for Docker/load-balancer.
-"""
-
-import logging
+"""Local single-process ATF API; durable SQLite reports, bounded background jobs."""
+import io
+import json
+import os
+import sqlite3
+import threading
 import uuid
-from typing import Optional
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from atf.archive import read_archive, MAX_UPLOAD
+from atf.analyzer import analyze
+from atf.runner import execute_tests
+from atf.ai import review
 
-from config import settings
-from database import engine, get_db
-from models import Base, Submission, SubmissionStatus
-from sandbox import LANGUAGE_CONFIGS
+ROOT = Path(__file__).resolve().parent
+DATA = Path(os.getenv('ATF_DATA_DIR', str(ROOT / '.atf')))
+DATA.mkdir(parents=True, exist_ok=True)
+DB = DATA / 'reports.sqlite3'
+POOL = ThreadPoolExecutor(max_workers=2)
+SLOTS = threading.BoundedSemaphore(6)
 
-log = logging.getLogger(__name__)
+def connection():
+    conn = sqlite3.connect(DB, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# ─── FastAPI application ──────────────────────────────────────────────────────
+def initialize():
+    with connection() as db:
+        db.execute('CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, status TEXT, report TEXT)')
+        db.execute("UPDATE reports SET status='interrupted' WHERE status IN ('queued','running')")
 
-app = FastAPI(
-    title="Sandboxed Algorithmic Judge",
-    description=(
-        "Secure remote code execution engine with AI-powered complexity analysis. "
-        "Submissions are executed in isolated Docker containers with strict resource limits."
-    ),
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
+@asynccontextmanager
+async def lifespan(app):
+    initialize()
+    yield
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # Tighten in production
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+app = FastAPI(title='ATF — Project Intelligence', version='2.0.0', lifespan=lifespan)
+app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 
-# ─── Startup ──────────────────────────────────────────────────────────────────
+@app.get('/')
+def index():
+    return FileResponse(ROOT / 'static' / 'index.html')
 
-@app.on_event("startup")
-def on_startup() -> None:
-    """Create all SQLAlchemy tables (idempotent)."""
-    Base.metadata.create_all(bind=engine)
-    log.info("Database tables initialised.")
+@app.get('/health')
+def health():
+    return {'status': 'ok', 'service': 'atf', 'mode': 'local single-user', 'execution': 'Docker only', 'ai': 'optional Ollama'}
 
+@app.get('/api/projects')
+def projects():
+    with connection() as db:
+        return [dict(row) for row in db.execute('SELECT id,name,created_at,status FROM reports ORDER BY created_at DESC LIMIT 100')]
 
-# ─── Schemas ──────────────────────────────────────────────────────────────────
+@app.get('/api/projects/{job_id}')
+def project(job_id: str):
+    with connection() as db:
+        row = db.execute('SELECT * FROM reports WHERE id=?', (job_id,)).fetchone()
+    if not row: raise HTTPException(404, 'Project not found.')
+    result = dict(row)
+    result['report'] = json.loads(result['report']) if result['report'] else None
+    return result
 
-SUPPORTED_LANGUAGES = set(LANGUAGE_CONFIGS.keys())
-
-
-class SubmissionRequest(BaseModel):
-    problem_id: str = Field(..., min_length=1, max_length=255, example="two-sum-001")
-    language: str = Field(..., example="python")
-    code: str = Field(..., min_length=1, max_length=65_536, example='print("Hello")')
-
-    @field_validator("language")
-    @classmethod
-    def language_must_be_supported(cls, v: str) -> str:
-        v = v.lower().strip()
-        if v not in SUPPORTED_LANGUAGES:
-            raise ValueError(
-                f"Unsupported language '{v}'. "
-                f"Supported: {sorted(SUPPORTED_LANGUAGES)}"
-            )
-        return v
-
-
-class SubmissionResponse(BaseModel):
-    job_id: str
-    status: str
-    message: str = "Submission queued for execution."
-
-
-class StatusResponse(BaseModel):
-    job_id: str
-    problem_id: str
-    language: str
-    status: str
-    stdout: Optional[str] = None
-    stderr: Optional[str] = None
-    execution_time_ms: Optional[float] = None
-    ai_feedback: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-
-# ─── Routes ───────────────────────────────────────────────────────────────────
-
-@app.post(
-    "/submit",
-    response_model=SubmissionResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Submit code for sandboxed execution",
-    tags=["Judge"],
-)
-def submit_code(request: SubmissionRequest) -> SubmissionResponse:
-    """
-    Accept a code submission:
-    1. Persist a PENDING record to PostgreSQL.
-    2. Enqueue the Celery task (imported here to avoid circular imports).
-    3. Return the `job_id` immediately — execution is asynchronous.
-    """
-    # Import here to avoid a module-level circular import between main ↔ worker
-    from worker import execute_submission
-
-    job_id = str(uuid.uuid4())
-
-    # Persist before enqueue so GET /status never returns 404 for a valid job
-    with get_db() as db:
-        submission = Submission(
-            id=job_id,
-            problem_id=request.problem_id,
-            language=request.language,
-            code=request.code,
-            status=SubmissionStatus.PENDING,
-        )
-        db.add(submission)
-
-    log.info("Queuing job %s  lang=%s  problem=%s", job_id, request.language, request.problem_id)
-
-    # .delay() enqueues to Redis; worker picks it up asynchronously
-    execute_submission.delay(
-        job_id=job_id,
-        code=request.code,
-        language=request.language,
-    )
-
-    return SubmissionResponse(job_id=job_id, status=SubmissionStatus.PENDING)
-
-
-@app.get(
-    "/status/{job_id}",
-    response_model=StatusResponse,
-    summary="Poll submission status and results",
-    tags=["Judge"],
-)
-def get_status(job_id: str) -> StatusResponse:
-    """Return the current state of a submission. Poll until status is terminal."""
+def process(job_id, files, skipped, run_tests, use_ai):
     try:
-        uuid.UUID(job_id)   # Validate format before hitting the DB
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid job_id format — must be a UUID.",
-        )
+        with connection() as db:
+            db.execute("UPDATE reports SET status='running' WHERE id=?", (job_id,))
+        report = analyze(files)
+        report['skipped_files'] = skipped
+        report['execution'] = execute_tests(files, run_tests)
+        report['ai'] = review(files, report, use_ai)
+        with connection() as db:
+            db.execute("UPDATE reports SET status='completed',report=? WHERE id=?", (json.dumps(report), job_id))
+    except Exception as exc:
+        with connection() as db:
+            db.execute("UPDATE reports SET status='failed',report=? WHERE id=?", (json.dumps({'error': f'Analysis failed ({type(exc).__name__}).'}), job_id))
+    finally:
+        SLOTS.release()
 
-    with get_db() as db:
-        row: Optional[Submission] = db.get(Submission, job_id)
+def enqueue(data, name, run_tests, use_ai):
+    try: files, skipped = read_archive(data)
+    except ValueError as exc: raise HTTPException(400, str(exc))
+    if not SLOTS.acquire(blocking=False): raise HTTPException(429, 'Analysis queue is full. Try again shortly.')
+    job_id = str(uuid.uuid4())
+    try:
+        with connection() as db:
+            db.execute('INSERT INTO reports VALUES (?,?,?,?,?)', (job_id, name[:120], datetime.now(timezone.utc).isoformat(), 'queued', None))
+        POOL.submit(process, job_id, files, skipped, run_tests, use_ai)
+    except Exception:
+        SLOTS.release()
+        raise
+    return {'id': job_id, 'status': 'queued'}
 
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No submission found with job_id={job_id}",
-        )
+@app.post('/api/projects', status_code=202)
+async def upload(file: UploadFile = File(...), run_tests: bool = Form(False), use_ai: bool = Form(False)):
+    try: data = await file.read(MAX_UPLOAD + 1)
+    finally: await file.close()
+    if len(data) > MAX_UPLOAD: raise HTTPException(413, 'Upload exceeds 10 MB.')
+    return enqueue(data, file.filename or 'Uploaded project', run_tests, use_ai)
 
-    return StatusResponse(
-        job_id=str(row.id),
-        problem_id=row.problem_id,
-        language=row.language,
-        status=row.status,
-        stdout=row.stdout,
-        stderr=row.stderr,
-        execution_time_ms=row.execution_time_ms,
-        ai_feedback=row.ai_feedback,
-        created_at=row.created_at.isoformat(),
-        updated_at=row.updated_at.isoformat(),
-    )
+@app.post('/api/demo', status_code=202)
+def demo(run_tests: bool = False, use_ai: bool = False):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as archive:
+        for path in sorted((ROOT / 'examples' / 'cart').rglob('*')):
+            if path.is_file() and '__pycache__' not in path.parts:
+                archive.write(path, path.relative_to(ROOT / 'examples' / 'cart'))
+    return enqueue(stream.getvalue(), 'Cart service · sample project', run_tests, use_ai)
+
+@app.get('/api/projects/{job_id}/report')
+def export(job_id: str, format: str = 'markdown'):
+    result = project(job_id)
+    if result['status'] != 'completed': raise HTTPException(409, 'Report is not ready.')
+    if format == 'json':
+        return Response(json.dumps(result, indent=2), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.json"'})
+    if format != 'markdown': raise HTTPException(400, 'Choose markdown or json.')
+    r = result['report']
+    lines = [f"# ATF report: {result['name']}", f"Created: {result['created_at']}", '\n## Summary', json.dumps(r['summary'], indent=2), '\n## Architecture', json.dumps(r['architecture'], indent=2), '\n## Findings']
+    for f in r['findings']:
+        lines.append(f"- [{f['severity'].upper()}] {f['title']} — {f['file']}:{f['line']} ({f['rule']})\n  {f['recommendation']}")
+    lines += ['\n## Execution', r['execution']['status'], r['execution']['detail'], '```text\n'+r['execution']['output']+'\n```', '\n## Proposed test cases']
+    for t in r['test_plan']:
+        lines.append(f"- {t['id']} / {t['target']} / {t['category']}: {t['scenario']} Expected: {t['expected']} ({t['status']})")
+    lines += ['\n## Local AI review', r['ai']['status'], r['ai']['text'], '\n## Future scope', *['- '+s for s in r['future_scope']], '\n## Limitations', *['- '+s for s in r['limitations']]]
+    return Response('\n\n'.join(lines), media_type='text/markdown', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.md"'})
 
 
-@app.get(
-    "/health",
-    summary="Liveness probe",
-    tags=["Ops"],
-    status_code=status.HTTP_200_OK,
-)
-def health_check() -> dict:
-    return {"status": "ok", "service": "sandboxed-judge-api"}
+@app.get('/api/projects/{job_id}/tests')
+def test_scaffold(job_id: str):
+    result = project(job_id)
+    if result['status'] != 'completed': raise HTTPException(409, 'Report is not ready.')
+    lines = ['"""Generated test scaffold. Replace each skip with domain-specific assertions."""', 'import unittest', '', 'class ProposedTests(unittest.TestCase):']
+    for case in result['report']['test_plan']:
+        lines += [f"    def test_{case['id'].replace('-', '_').lower()}(self):", '        # ' + case['target'].replace('\n',' ') + ': ' + case['category'], '        # ' + case['scenario'], '        self.skipTest("Implement the expected behavior from your project specification")', '']
+    lines += ['', 'if __name__ == "__main__":', '    unittest.main()']
+    return Response('\n'.join(lines), media_type='text/plain', headers={'Content-Disposition': f'attachment; filename="test_plan_{job_id}.py"'})
