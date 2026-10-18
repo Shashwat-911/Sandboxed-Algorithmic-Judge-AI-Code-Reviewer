@@ -28,6 +28,8 @@ def execute_tests(files, enabled=False):
         return dict(status='not_requested', detail='Enable isolated tests to execute an existing Python unittest suite. No source was executed.', output='')
     if not any(p.rsplit('/', 1)[-1].startswith('test_') and p.endswith('.py') for p in files):
         return dict(status='skipped', detail='No Python test_*.py suite found. Other test frameworks require a future runner.', output='')
+    if sum(len(source.encode()) for source in files.values()) > 20 * 1024 * 1024 or len(files) > 2000:
+        return dict(status='skipped', detail='Project exceeds the isolated runner budget (20 MB source / 2,000 files). Static analysis remains available.', output='')
     client = container = stream = None
     started = time.monotonic()
     try:

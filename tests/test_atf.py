@@ -22,9 +22,12 @@ def zipped(files):
 def test_archive_rejects_traversal(path):
     with pytest.raises(ValueError, match='unsafe'): read_archive(zipped({path: 'pass'}))
 
-def test_archive_limits():
-    with pytest.raises(ValueError, match='size'): read_archive(zipped({'large.py': 'x'*1048577}))
-    with pytest.raises(ValueError, match='1,000'): read_archive(zipped({f'{i}.py': '' for i in range(1001)}))
+def test_archive_limits(monkeypatch):
+    import atf.archive as archive
+    monkeypatch.setattr(archive, 'MAX_EXPANDED', 100)
+    with pytest.raises(ValueError, match='size'): read_archive(zipped({'large.py': 'x'*101}))
+    monkeypatch.setattr(archive, 'MAX_ENTRIES', 2)
+    with pytest.raises(ValueError, match='entries'): read_archive(zipped({f'{i}.py': '' for i in range(3)}))
 
 def test_symlinks_rejected():
     buffer=io.BytesIO()
@@ -108,13 +111,14 @@ def test_demo(api):
     assert any(f['rule']=='PY002' for f in row['report']['findings'])
     assert row['report']['summary']['test_files']==1
 
-def test_errors_and_ui(api):
+def test_errors_and_ui(api, monkeypatch):
     assert api.get('/').status_code==200
     assert api.get('/static/app.js').status_code==200
     assert api.get('/health').json()['status']=='ok'
     assert api.get('/api/projects/missing').status_code==404
     assert api.post('/api/projects',files={'file':('bad.zip',b'bad')}).status_code==400
-    assert api.post('/api/projects',files={'file':('big.zip',b'x'*(10*1024*1024+1))}).status_code==413
+    monkeypatch.setattr(main, 'MAX_UPLOAD', 1024)
+    assert api.post('/api/projects',files={'file':('big.zip',b'x'*1025)}).status_code==413
 
 def test_queue_backpressure(api):
     acquired=[]
