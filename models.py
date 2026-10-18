@@ -28,7 +28,7 @@ def _now() -> datetime:
 class Submission(Base):
     __tablename__ = "submissions"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     problem_id = Column(String(255), nullable=False, index=True)
     language = Column(String(50), nullable=False)
     code = Column(Text, nullable=False)

@@ -29,8 +29,8 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     # Prevent a zombie task from holding a DB row in RUNNING forever
-    task_soft_time_limit=90,
-    task_time_limit=120,
+    task_soft_time_limit=170,
+    task_time_limit=190,
     worker_prefetch_multiplier=1,   # One task at a time per worker process
     task_acks_late=True,            # ACK only after task completes (safer retries)
 )
@@ -79,8 +79,8 @@ def execute_submission(self, job_id: str, code: str, language: str) -> dict:
         # Continue — don't abort the actual execution over a DB hiccup
 
     # ── 2. Execute in sandbox ─────────────────────────────────────────────────
-    sandbox = DockerSandbox()
     try:
+        sandbox = DockerSandbox()
         result = sandbox.run(code=code, language=language)
     except Exception as exc:
         log.exception("Sandbox raised an unhandled exception for job %s", job_id)
@@ -128,7 +128,7 @@ def execute_submission(self, job_id: str, code: str, language: str) -> dict:
             job_id,
             status=db_status,
             stdout=result.stdout or None,
-            stderr=result.stderr or None,
+            stderr=result.stderr or result.error or None,
             execution_time_ms=result.execution_time_ms if result.execution_time_ms else None,
             ai_feedback=ai_feedback,
         )

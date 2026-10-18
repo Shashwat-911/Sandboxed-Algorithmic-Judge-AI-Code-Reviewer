@@ -60,7 +60,7 @@ LANGUAGE_CONFIGS: dict[str, dict] = {
         "filename": "solution.cpp",
         # Compile writes the binary into the shared workspace dir
         "compile_cmd": [
-            "gcc",
+            "g++",
             "/tmp/workspace/solution.cpp",
             "-o", "/tmp/workspace/solution",
             "-O2", "-std=c++17", "-lm",
@@ -117,6 +117,7 @@ class DockerSandbox:
             )
 
         workspace = tempfile.mkdtemp(dir=settings.SANDBOX_BASE_DIR)
+        os.chmod(workspace, 0o777)
         try:
             # Write source file
             src_path = os.path.join(workspace, cfg["filename"])
@@ -147,7 +148,7 @@ class DockerSandbox:
         )
         if result.exit_code == 0:
             result.status = "SUCCESS"
-        elif result.status != "TIMEOUT":
+        elif result.status not in {"TIMEOUT", "ERROR"}:
             result.status = "FAILED"
         return result
 
@@ -165,6 +166,9 @@ class DockerSandbox:
             mem_limit="256m",   # GCC/javac are memory-hungry
             measure_time=False,
         )
+
+        if compile_result.status == "ERROR":
+            return compile_result
 
         if compile_result.status == "TIMEOUT":
             return SandboxResult(
@@ -194,7 +198,7 @@ class DockerSandbox:
 
         if run_result.exit_code == 0:
             run_result.status = "SUCCESS"
-        elif run_result.status != "TIMEOUT":
+        elif run_result.status not in {"TIMEOUT", "ERROR"}:
             run_result.status = "FAILED"
         return run_result
 
@@ -216,6 +220,7 @@ class DockerSandbox:
         container: Optional[Container] = None
         timed_out = False
         start_ns = 0.0
+        stdout_raw = stderr_raw = b""
 
         try:
             container = self.client.containers.run(
@@ -246,7 +251,8 @@ class DockerSandbox:
                 user="nobody",
                 # ── Lifecycle ─────────────────────────────────────────────────
                 detach=True,
-                remove=False,   # We remove manually in finally so we can read logs
+                remove=False,   # Capture logs before removal
+                log_config=docker.types.LogConfig(type="local", config={"max-size": "64k", "max-file": "2"}),
             )
 
             if measure_time:
@@ -255,6 +261,8 @@ class DockerSandbox:
             exit_info = container.wait(timeout=settings.SANDBOX_TIMEOUT)
             elapsed_ms = (time.monotonic() - start_ns) * 1000 if measure_time else 0.0
             exit_code: int = exit_info.get("StatusCode", -1)
+            stdout_raw = container.logs(stdout=True, stderr=False, tail=200)[-MAX_OUTPUT_BYTES:]
+            stderr_raw = container.logs(stdout=False, stderr=True, tail=200)[-MAX_OUTPUT_BYTES:]
 
         except Exception as exc:
             # docker SDK raises requests.exceptions.ReadTimeout on wait() timeout
@@ -285,17 +293,6 @@ class DockerSandbox:
                 exit_code=-1,
                 execution_time_ms=elapsed_ms,
             )
-
-        # Capture and truncate output
-        raw_logs = container.logs(stdout=True, stderr=True) if container else b""  # noqa: F821
-        # After remove() container obj still holds the log data fetched before removal
-        # Re-fetch individually for cleaner separation:
-        try:
-            stdout_raw = container.logs(stdout=True, stderr=False)[-MAX_OUTPUT_BYTES:]
-            stderr_raw = container.logs(stdout=False, stderr=True)[-MAX_OUTPUT_BYTES:]
-        except Exception:
-            stdout_raw = raw_logs[-MAX_OUTPUT_BYTES:]
-            stderr_raw = b""
 
         return SandboxResult(
             status="PENDING",   # Caller sets final status
