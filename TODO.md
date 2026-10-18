@@ -1,15 +1,14 @@
-# Task Completion Plan: Fix Docker Compose Container Conflict
+# Delivery checklist
 
-## [ ] Step 1: Edit docker-compose.yml
-- Remove obsolete `version: "3.9"` line to eliminate warning.
+- [x] Inspect original architecture and document defects
+- [x] Build local ATF dashboard and project upload flow
+- [x] Add bounded ZIP ingestion and source filtering
+- [x] Add syntax checks, findings and architecture inventory
+- [x] Generate edge-case plans and downloadable skipped test scaffolds
+- [x] Execute Python unittest suites only in Docker
+- [x] Integrate optional real Ollama review
+- [x] Persist report history and export Markdown / JSON
+- [x] Add sample project, automated tests, launch script and demo guide
+- [x] Verify real Docker failure detection and browser flow
 
-## [ ] Step 2: Stop and clean up existing containers
-- Run `docker compose down` to remove conflicting ollama container and others.
-
-## [ ] Step 3: Start services fresh
-- Run `docker compose up --build -d`.
-
-## [ ] Step 4: Verify
-- Run `docker compose ps` to confirm all services are Up/healthy.
-- Test API health at http://localhost:8000/health.
-
+Supported scope and future extensions are documented in README.md. The optional legacy distributed stack is retained but is not part of the verified primary demo.
