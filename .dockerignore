@@ -1,0 +1,6 @@
+.git
+.env
+.venv
+.atf
+__pycache__
+.pytest_cache
