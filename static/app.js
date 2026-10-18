@@ -1,12 +1,12 @@
-const $=s=>document.querySelector(s);let selected=null,poll=null,current=null;
+const $=s=>document.querySelector(s);let selected=null,poll=null,current=null;let uploadLimit=100*1024*1024;
 const escapeHTML=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const badge=s=>`<span class="badge ${escapeHTML(s)}">${escapeHTML(s)}</span>`;
 async function api(url,options){const r=await fetch(url,options);if(!r.ok){let d;try{d=await r.json()}catch{}throw Error(typeof d?.detail==='string'?d.detail:`Request failed (${r.status})`)}return r.json()}
 function notice(s){$('#notice').textContent=s}
-function busy(b){$('#demo').disabled=b;$('#analyze').disabled=b}
+function busy(b){$('#demo').disabled=b;$('#analyze').disabled=b;$('#import-repo').disabled=b}
 async function history(){const rows=await api('/api/projects');$('#history').replaceChildren();if(!rows.length){$('#history').textContent='Your first report starts here.';return}for(const row of rows){let b=document.createElement('button');b.className=row.id===selected?'selected':'';b.innerHTML=`${escapeHTML(row.name)}<small>${escapeHTML(row.status)} · ${new Date(row.created_at).toLocaleDateString()}</small>`;b.onclick=()=>select(row.id);$('#history').appendChild(b)}}
 async function submit(url,options){busy(true);notice('Preparing your project…');try{let r=await api(url,options);await select(r.id)}catch(e){notice(e.message)}finally{busy(false)}}
-$('#upload-form').onsubmit=e=>{e.preventDefault();const data=new FormData();data.append('file',$('#file').files[0]);data.append('run_tests',$('#run-tests').checked);data.append('use_ai',$('#use-ai').checked);submit('/api/projects',{method:'POST',body:data})};
+$('#upload-form').onsubmit=e=>{e.preventDefault();const file=$('#file').files[0];if(!file)return;if(file.size>uploadLimit){notice(`ZIP exceeds the ${Math.floor(uploadLimit/1024/1024)} MB upload limit.`);return}const data=new FormData();data.append('file',$('#file').files[0]);data.append('run_tests',$('#run-tests').checked);data.append('use_ai',$('#use-ai').checked);submit('/api/projects',{method:'POST',body:data})};
 $('#demo').onclick=()=>submit(`/api/demo?run_tests=${$('#run-tests').checked}&use_ai=${$('#use-ai').checked}`,{method:'POST'});
 $('#file').onchange=()=>{$('#file-name').textContent=$('#file').files[0]?.name||'Choose a project ZIP'};
 for(const name of ['dragenter','dragover'])$('#drop').addEventListener(name,()=>$('#drop').classList.add('dragging'));
@@ -17,8 +17,24 @@ if(tab==='findings')p.innerHTML=`<p class="muted">Evidence-linked static checks.
 if(tab==='tests')p.innerHTML=`<p class="muted">Proposed scenarios derived from Python functions. Refine expected values using your requirements before implementing these tests.</p>${r.test_plan.map(t=>`<article class="finding">${badge(t.category)} <span class="location">${t.id} · ${escapeHTML(t.file)}:${t.line}</span><h4>${escapeHTML(t.target)}</h4><p>${escapeHTML(t.scenario)}</p><p><b>Expected:</b> ${escapeHTML(t.expected)}</p></article>`).join('')}`;
 if(tab==='execution')p.innerHTML=`<h2>Isolated test run ${badge(r.execution.status)}</h2><p>${escapeHTML(r.execution.detail)}</p>${r.execution.duration_ms?`<p>Wall time: ${r.execution.duration_ms} ms</p>`:''}<pre>${escapeHTML(r.execution.output||'No execution output.')}</pre><h2>Static validation</h2>${r.checks.map(c=>`<p>${badge(c.status)} ${escapeHTML(c.file)} · ${escapeHTML(c.check)}</p>`).join('')||'<p>No Python source to parse.</p>'}`;
 if(tab==='ai')p.innerHTML=`<h2>Local AI review ${badge(r.ai.status)}</h2><pre>${escapeHTML(r.ai.text)}</pre><p class="muted">${escapeHTML(r.ai.note||'Enable local AI review before submitting to use Ollama. Static analysis does not require a model.')}</p>${r.ai.files_in_context?`<p class="muted">Context: ${r.ai.files_in_context.length} files · ${r.ai.characters_in_context} characters</p>`:''}`;
-if(tab==='files')p.innerHTML=`<table><thead><tr><th>File</th><th>Language</th><th>Lines</th></tr></thead><tbody>${r.inventory.map(f=>`<tr><td>${escapeHTML(f.path)}</td><td>${escapeHTML(f.language)}</td><td>${f.lines}</td></tr>`).join('')}</tbody></table><p class="muted">${r.skipped_files.length} excluded files (dependencies, environment files, binaries, or unsupported formats).</p>`;
+if(tab==='files')p.innerHTML=`<table><thead><tr><th>File</th><th>Language</th><th>Lines</th></tr></thead><tbody>${r.inventory.map(f=>`<tr><td>${escapeHTML(f.path)}</td><td>${escapeHTML(f.language)}</td><td>${f.lines}</td></tr>`).join('')}</tbody></table><p class="muted">${r.skipped_files.length} excluded files (dependencies, environment files, binaries, unsupported formats, or oversized files).</p>`;
 if(tab==='architecture'){const a=r.architecture||{entrypoints:[],routes:[],imports:[],dependencies:[],note:'Resubmit to generate architecture inventory.'};p.innerHTML=`<h2>Entry points</h2><pre>${escapeHTML(a.entrypoints.join('\n')||'No conventional entry point detected.')}</pre><h2>API routes</h2><pre>${escapeHTML(a.routes.map(x=>`${x.method} ${x.path} → ${x.file}:${x.line}`).join('\n')||'No Python route decorators detected.')}</pre><h2>Declared dependencies</h2><pre>${escapeHTML(a.dependencies.map(x=>`${x.declaration} · ${x.manifest}`).join('\n')||'No requirements.txt or package.json dependencies detected.')}</pre><h2>Python imports</h2><pre>${escapeHTML(a.imports.map(x=>`${x.file}:${x.line} → ${x.module}`).join('\n'))}</pre><p class="muted">${escapeHTML(a.note)}</p>`;}
 if(tab==='roadmap')p.innerHTML=`<h2>Recommended improvements</h2><ul>${r.suggestions.map(s=>`<li>${escapeHTML(s)}</li>`).join('')||'<li>Add specification-driven tests for critical workflows.</li>'}</ul><h2>Future scope</h2><ul>${r.future_scope.map(s=>`<li>${escapeHTML(s)}</li>`).join('')}</ul><h2>Analysis boundaries</h2><ul>${r.limitations.map(s=>`<li>${escapeHTML(s)}</li>`).join('')}</ul>`;
 }
 history().catch(e=>notice(e.message));
+
+for(const mode of ['zip','repo']){
+  $('#'+mode+'-mode').onclick=()=>{
+    $('#upload-form').hidden=mode!=='zip';$('#repo-form').hidden=mode!=='repo';
+    for(const item of ['zip','repo']){const button=$('#'+item+'-mode');button.classList.toggle('active',item===mode);button.setAttribute('aria-pressed',String(item===mode));}
+  };
+}
+$('#repo-form').onsubmit=e=>{
+  e.preventDefault();
+  submit('/api/repositories',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('#repo-url').value.trim(),ref:$('#repo-ref').value.trim(),run_tests:$('#run-tests').checked,use_ai:$('#use-ai').checked})});
+};
+api('/api/limits').then(limits=>{
+  uploadLimit=limits.upload_bytes;
+  $('#upload-limit').textContent=`or drop it here · up to ${limits.upload_mb} MB`;
+  $('#analysis-limits').textContent=`ZIP / repository: ${limits.upload_mb} MB · expanded: ${limits.expanded_mb} MB · source: ${limits.source_mb} MB. Files over ${limits.file_mb} MB are skipped.`;
+}).catch(()=>notice('Could not load server limits. Refresh before uploading.'));

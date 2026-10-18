@@ -22,3 +22,10 @@
 - CI configuration is added but has not run on GitHub.
 - No external penetration test, public multi-tenant security assessment, load benchmark, coverage percentage, or dependency-CVE scan is claimed.
 - No universal correctness or complete all-language test generation is claimed.
+
+## Larger uploads and repository import update
+
+- Default local suite: 43 passed, 2 Docker tests skipped (unchanged runner isolation tests remain opt-in).
+- Added tests for uploads exceeding the old 10 MB limit, configured limits, oversized-file filtering, source budgets, public GitHub URL/ref validation, streamed downloads, download errors/redirect rejection, size caps, report provenance, and queue-slot release after failures.
+- Limits are exposed by `/api/limits` and displayed by the dashboard.
+- Live checks: a 103,809,313-byte ZIP was accepted and analyzed; a public GitHub import of this repository completed with 33 accepted files from its then-current default branch. Browser verification confirmed the import form, limits, and completed report.

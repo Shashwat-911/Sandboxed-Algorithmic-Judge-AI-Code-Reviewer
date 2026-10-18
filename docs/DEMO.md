@@ -7,7 +7,7 @@
 5. Show **Test plan**: normal, empty/invalid, boundary and repeated-call scenarios. These are proposed, not executed. Download **Tests** to demonstrate an honest skipped scaffold ready for domain-specific assertions.
 6. Show **AI review**: real local-model suggestions, with context limits and availability explicitly reported.
 7. Show **Architecture**, **Files**, and **Roadmap**, then download Markdown/JSON as the review handoff.
-8. Upload your own ZIP. Exclude dependency directories and secrets before creating it.
+8. Upload your own ZIP (up to 100 MB), or choose **GitHub repository** and paste a public repository URL. Leave ref blank for its default branch, or specify a branch, tag or commit. Exclude dependencies and secrets before creating local archives.
 
 ## Explain the engineering choices
 
