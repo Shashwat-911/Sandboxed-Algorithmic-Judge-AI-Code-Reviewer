@@ -14,6 +14,10 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
+from atf.limits import MAX_EXPANDED, MAX_SOURCE, MAX_FILE, MAX_ENTRIES, MIB
+from atf.repository import repository_archive, parse_repository
 from atf.archive import read_archive, MAX_UPLOAD
 from atf.analyzer import analyze
 from atf.runner import execute_tests
@@ -41,7 +45,7 @@ async def lifespan(app):
     initialize()
     yield
 
-app = FastAPI(title='ATF — Project Intelligence', version='2.0.0', lifespan=lifespan)
+app = FastAPI(title='ATF â€” Project Intelligence', version='2.0.0', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 
 @app.get('/')
@@ -66,11 +70,12 @@ def project(job_id: str):
     result['report'] = json.loads(result['report']) if result['report'] else None
     return result
 
-def process(job_id, files, skipped, run_tests, use_ai):
+def process(job_id, files, skipped, run_tests, use_ai, source=None):
     try:
         with connection() as db:
             db.execute("UPDATE reports SET status='running' WHERE id=?", (job_id,))
         report = analyze(files)
+        report['source'] = source or {'kind': 'zip'}
         report['skipped_files'] = skipped
         report['execution'] = execute_tests(files, run_tests)
         report['ai'] = review(files, report, use_ai)
@@ -82,26 +87,62 @@ def process(job_id, files, skipped, run_tests, use_ai):
     finally:
         SLOTS.release()
 
-def enqueue(data, name, run_tests, use_ai):
-    try: files, skipped = read_archive(data)
-    except ValueError as exc: raise HTTPException(400, str(exc))
-    if not SLOTS.acquire(blocking=False): raise HTTPException(429, 'Analysis queue is full. Try again shortly.')
+def enqueue(data, name, run_tests, use_ai, source=None, reserved=False):
+    if not reserved and not SLOTS.acquire(blocking=False):
+        raise HTTPException(429, 'Analysis queue is full. Try again shortly.')
     job_id = str(uuid.uuid4())
     try:
+        try: files, skipped = read_archive(data)
+        except ValueError as exc: raise HTTPException(400, str(exc))
         with connection() as db:
             db.execute('INSERT INTO reports VALUES (?,?,?,?,?)', (job_id, name[:120], datetime.now(timezone.utc).isoformat(), 'queued', None))
-        POOL.submit(process, job_id, files, skipped, run_tests, use_ai)
+        POOL.submit(process, job_id, files, skipped, run_tests, use_ai, source)
     except Exception:
         SLOTS.release()
         raise
     return {'id': job_id, 'status': 'queued'}
 
+@app.get('/api/limits')
+def limits():
+    return {'upload_bytes': MAX_UPLOAD, 'upload_mb': MAX_UPLOAD // MIB,
+            'expanded_mb': MAX_EXPANDED // MIB, 'source_mb': MAX_SOURCE // MIB,
+            'file_mb': MAX_FILE // MIB, 'entries': MAX_ENTRIES}
+
 @app.post('/api/projects', status_code=202)
 async def upload(file: UploadFile = File(...), run_tests: bool = Form(False), use_ai: bool = Form(False)):
-    try: data = await file.read(MAX_UPLOAD + 1)
-    finally: await file.close()
-    if len(data) > MAX_UPLOAD: raise HTTPException(413, 'Upload exceeds 10 MB.')
-    return enqueue(data, file.filename or 'Uploaded project', run_tests, use_ai)
+    try:
+        # Inspect the spooled file without copying the whole upload into memory.
+        file.file.seek(0, 2)
+        if file.file.tell() > MAX_UPLOAD:
+            raise HTTPException(413, f'Upload exceeds {MAX_UPLOAD // MIB} MB.')
+        file.file.seek(0)
+        return await run_in_threadpool(enqueue, file.file, file.filename or 'Uploaded project', run_tests, use_ai)
+    finally:
+        await file.close()
+
+class RepositoryRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+    ref: str = Field(default='', max_length=200)
+    run_tests: bool = False
+    use_ai: bool = False
+
+@app.post('/api/repositories', status_code=202)
+def import_repository(request: RepositoryRequest):
+    try: parse_repository(request.url, request.ref)
+    except ValueError as exc: raise HTTPException(400, str(exc))
+    if not SLOTS.acquire(blocking=False):
+        raise HTTPException(429, 'Analysis queue is full. Try again shortly.')
+    transferred = False
+    try:
+        with repository_archive(request.url, request.ref) as (archive, source):
+            # enqueue/process owns and releases the reservation from this point.
+            transferred = True
+            return enqueue(archive, source['url'].removeprefix('https://github.com/'),
+                           request.run_tests, request.use_ai, source, reserved=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        if not transferred: SLOTS.release()
 
 @app.post('/api/demo', status_code=202)
 def demo(run_tests: bool = False, use_ai: bool = False):
@@ -110,7 +151,7 @@ def demo(run_tests: bool = False, use_ai: bool = False):
         for path in sorted((ROOT / 'examples' / 'cart').rglob('*')):
             if path.is_file() and '__pycache__' not in path.parts:
                 archive.write(path, path.relative_to(ROOT / 'examples' / 'cart'))
-    return enqueue(stream.getvalue(), 'Cart service · sample project', run_tests, use_ai)
+    return enqueue(stream.getvalue(), 'Cart service Â· sample project', run_tests, use_ai)
 
 @app.get('/api/projects/{job_id}/report')
 def export(job_id: str, format: str = 'markdown'):
@@ -120,9 +161,9 @@ def export(job_id: str, format: str = 'markdown'):
         return Response(json.dumps(result, indent=2), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.json"'})
     if format != 'markdown': raise HTTPException(400, 'Choose markdown or json.')
     r = result['report']
-    lines = [f"# ATF report: {result['name']}", f"Created: {result['created_at']}", '\n## Summary', json.dumps(r['summary'], indent=2), '\n## Architecture', json.dumps(r['architecture'], indent=2), '\n## Findings']
+    lines = [f"# ATF report: {result['name']}", f"Created: {result['created_at']}", '\n## Source', json.dumps(r.get('source', {'kind':'zip'})), '\n## Summary', json.dumps(r['summary'], indent=2), '\n## Architecture', json.dumps(r['architecture'], indent=2), '\n## Findings']
     for f in r['findings']:
-        lines.append(f"- [{f['severity'].upper()}] {f['title']} — {f['file']}:{f['line']} ({f['rule']})\n  {f['recommendation']}")
+        lines.append(f"- [{f['severity'].upper()}] {f['title']} â€” {f['file']}:{f['line']} ({f['rule']})\n  {f['recommendation']}")
     lines += ['\n## Execution', r['execution']['status'], r['execution']['detail'], '```text\n'+r['execution']['output']+'\n```', '\n## Proposed test cases']
     for t in r['test_plan']:
         lines.append(f"- {t['id']} / {t['target']} / {t['category']}: {t['scenario']} Expected: {t['expected']} ({t['status']})")
