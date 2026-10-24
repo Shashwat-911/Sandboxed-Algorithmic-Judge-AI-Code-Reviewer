@@ -22,6 +22,7 @@ from atf.archive import read_archive, MAX_UPLOAD
 from atf.analyzer import analyze
 from atf.runner import execute_tests
 from atf.ai import review
+from atf.verification import verification
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.getenv('ATF_DATA_DIR', str(ROOT / '.atf')))
@@ -68,6 +69,8 @@ def project(job_id: str):
     if not row: raise HTTPException(404, 'Project not found.')
     result = dict(row)
     result['report'] = json.loads(result['report']) if result['report'] else None
+    if result['report'] and result['status']=='completed':
+        result['report']['verification'] = verification(result['report'])
     return result
 
 def process(job_id, files, skipped, run_tests, use_ai, source=None):
@@ -79,6 +82,7 @@ def process(job_id, files, skipped, run_tests, use_ai, source=None):
         report['skipped_files'] = skipped
         report['execution'] = execute_tests(files, run_tests)
         report['ai'] = review(files, report, use_ai)
+        report['verification'] = verification(report)
         with connection() as db:
             db.execute("UPDATE reports SET status='completed',report=? WHERE id=?", (json.dumps(report), job_id))
     except Exception as exc:
@@ -151,21 +155,26 @@ def demo(run_tests: bool = False, use_ai: bool = False):
         for path in sorted((ROOT / 'examples' / 'cart').rglob('*')):
             if path.is_file() and '__pycache__' not in path.parts:
                 archive.write(path, path.relative_to(ROOT / 'examples' / 'cart'))
-    return enqueue(stream.getvalue(), 'Cart service Â· sample project', run_tests, use_ai)
+    return enqueue(stream.getvalue(), 'Cart service - sample project', run_tests, use_ai)
 
 @app.get('/api/projects/{job_id}/report')
 def export(job_id: str, format: str = 'markdown'):
     result = project(job_id)
     if result['status'] != 'completed': raise HTTPException(409, 'Report is not ready.')
+    if format == 'pdf':
+        from atf.pdf_report import render_report
+        return Response(render_report(result), media_type='application/pdf', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.pdf"'})
     if format == 'json':
         return Response(json.dumps(result, indent=2), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.json"'})
-    if format != 'markdown': raise HTTPException(400, 'Choose markdown or json.')
+    if format != 'markdown': raise HTTPException(400, 'Choose markdown, json or pdf.')
     r = result['report']
-    lines = [f"# ATF report: {result['name']}", f"Created: {result['created_at']}", '\n## Source', json.dumps(r.get('source', {'kind':'zip'})), '\n## Summary', json.dumps(r['summary'], indent=2), '\n## Architecture', json.dumps(r['architecture'], indent=2), '\n## Findings']
+    lines = [f"# ATF report: {result['name']}", f"Created: {result['created_at']}", '\n## Verification status', json.dumps(verification(r), indent=2), '\n## Analysis provenance', json.dumps({'analyzer_version':r.get('analyzer_version','legacy'), 'source_digest':r.get('source_digest','not recorded'), 'planning_coverage':r.get('planning_coverage',{'note':'Legacy report does not record omitted functions.'})},indent=2), '\n## Source', json.dumps(r.get('source', {'kind':'zip'})), '\n## Summary', json.dumps(r['summary'], indent=2), '\n## Architecture', json.dumps(r['architecture'], indent=2), '\n## Findings']
     for f in r['findings']:
         lines.append(f"- [{f['severity'].upper()}] {f['title']} â€” {f['file']}:{f['line']} ({f['rule']})\n  {f['recommendation']}")
+        lines.append(f"  Context: {f.get('context','not recorded')}; confidence: {f.get('confidence','not recorded')}. Evidence: {f.get('evidence','not recorded')}")
     lines += ['\n## Execution', r['execution']['status'], r['execution']['detail'], '```text\n'+r['execution']['output']+'\n```', '\n## Proposed test cases']
     for t in r['test_plan']:
+        lines.append(f"Location: {t['file']}:{t['line']}; basis: {t.get('basis','legacy generic template')}")
         lines.append(f"- {t['id']} / {t['target']} / {t['category']}: {t['scenario']} Expected: {t['expected']} ({t['status']})")
     lines += ['\n## Local AI review', r['ai']['status'], r['ai']['text'], '\n## Future scope', *['- '+s for s in r['future_scope']], '\n## Limitations', *['- '+s for s in r['limitations']]]
     return Response('\n\n'.join(lines), media_type='text/markdown', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.md"'})
