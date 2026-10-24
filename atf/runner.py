@@ -15,12 +15,25 @@ for name,source in files.items():
  path.write_text(source,encoding='utf-8')
 os.chdir('/workspace/project')
 sys.path.insert(0,os.getcwd())
-suite=unittest.defaultTestLoader.discover('.')
+# Discover conventional test directories even without __init__.py.
+# Use each directory as its own top level to support sibling test-helper imports.
+paths=sorted({str(p.parent) for p in Path('.').rglob('test_*.py')})
+suite=unittest.TestSuite()
+seen=set()
+def leaves(value):
+ for test in value:
+  if isinstance(test,unittest.TestSuite): yield from leaves(test)
+  else: yield test
+for directory in paths:
+ for test in leaves(unittest.TestLoader().discover(directory,top_level_dir=directory)):
+  if test.id() not in seen:
+   seen.add(test.id());suite.addTest(test)
 count=suite.countTestCases()
 print('Discovered tests:',count,flush=True)
 if count == 0: sys.exit(5)
 result=unittest.TextTestRunner(verbosity=2).run(suite)
-sys.exit(0 if result.wasSuccessful() else 1)
+missing=any('ModuleNotFoundError:' in error for _,error in result.errors)
+sys.exit(6 if missing else 7 if result.testsRun == len(result.skipped) else 0 if result.wasSuccessful() else 1)
 '''
 
 def execute_tests(files, enabled=False):
@@ -58,8 +71,8 @@ def execute_tests(files, enabled=False):
             return dict(status='timeout', detail='Suite exceeded the 20 second execution deadline.', output='', duration_ms=round((time.monotonic()-started)*1000))
         code = container.attrs['State']['ExitCode']
         output = container.logs(tail=150).decode('utf-8', errors='replace')[-16000:]
-        status = 'passed' if code == 0 else 'no_tests' if code == 5 else 'failed'
-        return dict(status=status, detail='Existing Python unittest suite; no dependencies installed. Output is untrusted project output.', exit_code=code, output=output, duration_ms=round((time.monotonic()-started)*1000))
+        status = 'passed' if code == 0 else 'no_tests' if code == 5 else 'blocked_dependencies' if code == 6 else 'all_skipped' if code == 7 else 'failed'
+        return dict(status=status, detail=('Test discovery/execution encountered missing imports. No project correctness verdict; use a pre-provisioned dependency environment.' if code == 6 else 'Existing Python unittest suite; no dependencies installed. Output is untrusted project output.'), exit_code=code, output=output, duration_ms=round((time.monotonic()-started)*1000))
     except docker.errors.ImageNotFound:
         return dict(status='unavailable', detail='Runner image missing. Run: docker pull python:3.11-alpine', output='')
     except Exception as exc:
