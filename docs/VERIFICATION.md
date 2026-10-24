@@ -29,3 +29,14 @@
 - Added tests for uploads exceeding the old 10 MB limit, configured limits, oversized-file filtering, source budgets, public GitHub URL/ref validation, streamed downloads, download errors/redirect rejection, size caps, report provenance, and queue-slot release after failures.
 - Limits are exposed by `/api/limits` and displayed by the dashboard.
 - Live checks: a 103,809,313-byte ZIP was accepted and analyzed; a public GitHub import of this repository completed with 33 accepted files from its then-current default branch. Browser verification confirmed the import form, limits, and completed report.
+
+## Report accuracy and PDF update - 24 October 2026
+
+- 53 tests passed, 2 opt-in Docker integration tests skipped; one existing TestClient deprecation warning.
+- Regression checks cover syntax-aware rules, test-harness severity context, keyword-only defaults, module-balanced scenario selection, source digests, project-specific roadmap suggestions and AI source selection.
+- Authored synthetic runner fixtures verify directories without package markers, missing dependencies, zero tests and all-skipped suites. No finance code was run on the host.
+- API checks verify explicit incomplete verification in Markdown and PDF; PDF text is parsed with pypdf.
+- A three-page PDF was rendered and all pages visually inspected for readable layout and overflow.
+- JavaScript syntax and Git whitespace checks passed.
+- Docker and Ollama were not revalidated live in this update. Earlier integration results above are historical, not evidence of current availability.
+- See REPORT_ACCURACY_AUDIT.md for the finance snapshot, observations and remaining uncertainty.

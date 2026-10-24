@@ -24,12 +24,12 @@ On Linux/macOS use `.venv/bin/python` for the equivalent commands. Run a single 
 
 - ZIP ingestion with traversal and symlink rejection, size limits, source filtering, and enclosing-folder normalization.
 - Inventory across Python, JS/TS, Java, C/C++, Go and Rust, plus configuration and documentation.
-- Python AST syntax checks and evidence-linked rules for mutable defaults, swallowed exceptions, assertions and long functions; text rules for possible credentials, dynamic evaluation, shell execution and debug configuration.
+- Python AST syntax checks and context-aware rules for mutable defaults, swallowed exceptions, assertions, long functions, possible credentials, dynamic evaluation, shell execution and debug configuration. Non-Python files receive inventory only.
 - Architecture inventory: Python imports and route decorators, common entry points, requirements.txt and package.json dependencies.
-- Function-linked test plans covering normal, boundary, invalid and repeated calls. Downloadable unittest **scaffolds are skipped until you implement assertions**.
+- Evidence-linked proposed scenarios for up to 80 production functions, balanced across source files with explicit selection and omission counts. These are planning suggestions, not executed tests or measured coverage. Downloadable unittest **scaffolds are skipped until you implement assertions**.
 - Existing Python **standard-library unittest** execution in a non-root Docker container with no network, a read-only root, bounded tmpfs, memory/CPU/process limits, rotating logs and a 20-second execution deadline. No host execution fallback and no automatic installation of uploaded dependencies.
 - Optional real local-model review through Ollama, with explicit availability and context-limit reporting.
-- Persistent project history; Markdown and JSON report exports; a sample project with reproducible failures.
+- Persistent project history; PDF, Markdown and JSON report exports; a sample project with reproducible failures.
 
 This is a single-user local demonstration, not a hosted multi-tenant service. It does not prove correctness, measure coverage, audit dependency CVEs, or execute arbitrary language/framework test suites. Static findings are review candidates. AI suggestions require human verification. No artificial quality score or fabricated passing tests.
 
@@ -62,7 +62,7 @@ Start Docker Desktop (Linux containers), then provision the runner:
 docker pull python:3.11-alpine
 ```
 
-Select **Run Python tests in Docker** before submitting. Tests must follow unittest discovery (`test_*.py`); subdirectories should be importable packages with `__init__.py`. The runner uses Python 3.11 and the standard library only. Missing third-party imports appear as test failures rather than silently installing arbitrary dependencies. A suite with zero discovered tests is reported as `no_tests`, not passed. Docker execution is skipped for projects over 20 MB of accepted source or 2,000 files, preserving its memory/tmpfs budget; static analysis still completes.
+Select **Run Python tests in Docker** before submitting. Tests must follow unittest discovery (`test_*.py`); test directories without `__init__.py` are also discovered. The runner uses Python 3.11 and the standard library only. Missing third-party imports are reported as `blocked_dependencies`; dependencies are not installed automatically. An entirely skipped suite is `all_skipped`, never passed. A suite with zero discovered tests is reported as `no_tests`, not passed. Docker execution is skipped for projects over 20 MB of accepted source or 2,000 files, preserving its memory/tmpfs budget; static analysis still completes.
 
 The sample has **3 tests: 1 pass, 1 failure, 1 error**. `add_item` shares a mutable default list; `average_price([])` divides by zero. These defects are intentional demonstration fixtures, not defects in ATF itself.
 
@@ -82,7 +82,7 @@ $env:ATF_OLLAMA_MODEL='qwen2.5-coder:3b'
 .\start.ps1
 ```
 
-Select **Add local AI review**. Only supported source text is considered; environment files are excluded and basic credential assignments are redacted on a best-effort basis. AI context is bounded to 28,000 characters total and 5,000 per file; the report identifies included files. Large repositories are not fully visible to the model. Static analysis still examines all accepted files. AI is optional and its absence does not erase static results.
+Select **Add local AI review**. Only supported source text is considered; environment files are excluded and basic credential assignments are redacted on a best-effort basis. AI context is bounded to 28,000 characters total and 1,400 per file, prioritizing production source across modules and excerpts near findings; the report identifies included and omitted files. Large repositories are not fully visible to the model. Python static analysis examines accepted Python files; other accepted files contribute inventory. AI is optional and its absence does not erase static results.
 
 ## Limits and operation
 
@@ -107,8 +107,13 @@ Interactive reference: http://127.0.0.1:8000/docs
 | `GET /api/projects/{id}` | Status and complete report |
 | `GET /api/projects/{id}/report?format=markdown` | Markdown export |
 | `GET /api/projects/{id}/report?format=json` | JSON export |
+| `GET /api/projects/{id}/report?format=pdf` | Download printable PDF report |
 | `GET /api/projects/{id}/tests` | Proposed unittest scaffold |
 | `GET /health` | API liveness, not integration readiness |
+
+## Report interpretation
+
+Every completed report displays verification status. Completion means analysis finished; unavailable, unrequested, empty, skipped or dependency-blocked execution does not establish correctness. Even a passing suite is labeled `tests_passed_with_limits`. Reports include an analyzer version and accepted-source digest. See [the finance report accuracy audit](docs/REPORT_ACCURACY_AUDIT.md) for an evidence-based example. Use **Download PDF** in a completed report to share it.
 
 ## Verification
 
