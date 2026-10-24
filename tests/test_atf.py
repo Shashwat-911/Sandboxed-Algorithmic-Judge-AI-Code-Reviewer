@@ -49,7 +49,8 @@ def test_static_evidence_and_syntax():
     report=analyze({'a.py':'def add(x=[]):\n    return eval(input())\n','broken.py':'def !','README.md':'readme'})
     assert {f['rule'] for f in report['findings']} >= {'SEC002','PY001','PY002','TEST001'}
     assert next(f for f in report['findings'] if f['rule']=='PY002')['line']==1
-    assert len(report['test_plan'])==4
+    assert report['planning_coverage']['selected_functions']==1
+    assert all(t['target']=='add' for t in report['test_plan'])
     assert {c['status'] for c in report['checks']}=={'passed','failed'}
 
 def test_credentials_not_in_findings():
