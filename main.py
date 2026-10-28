@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -23,6 +24,8 @@ from atf.analyzer import analyze
 from atf.runner import execute_tests
 from atf.ai import review
 from atf.verification import verification
+from atf import browser_api
+from atf.playwright_inventory import inspect_playwright
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.getenv('ATF_DATA_DIR', str(ROOT / '.atf')))
@@ -44,10 +47,25 @@ def initialize():
 @asynccontextmanager
 async def lifespan(app):
     initialize()
+    browser_api.initialize()
     yield
 
-app = FastAPI(title='ATF â€” Project Intelligence', version='2.0.0', lifespan=lifespan)
+app = FastAPI(title='ATF â€” Project Intelligence', version='3.0.0', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
+app.include_router(browser_api.router)
+
+@app.middleware('http')
+async def protect_local_execution(request: Request, call_next):
+    if request.url.path.startswith('/api/playwright') and request.method=='POST':
+        origin=request.headers.get('origin')
+        from urllib.parse import urlsplit
+        if origin and urlsplit(origin).netloc != request.headers.get('host'):
+            return JSONResponse({'detail':'Cross-origin execution is not allowed.'},status_code=403)
+        if request.headers.get('sec-fetch-site')=='cross-site':
+            return JSONResponse({'detail':'Cross-site execution is not allowed.'},status_code=403)
+        if not request.headers.get('content-type','').startswith('application/json'):
+            return JSONResponse({'detail':'Execution requests require application/json.'},status_code=415)
+    return await call_next(request)
 
 @app.get('/')
 def index():
@@ -55,7 +73,7 @@ def index():
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'service': 'atf', 'mode': 'local single-user', 'execution': 'Docker only', 'ai': 'optional Ollama'}
+    return {'status': 'ok', 'service': 'atf', 'mode': 'local single-user', 'execution': 'Python unittest: Docker; browser journeys: local Playwright worker', 'ai': 'optional Ollama'}
 
 @app.get('/api/projects')
 def projects():
@@ -70,6 +88,8 @@ def project(job_id: str):
     result = dict(row)
     result['report'] = json.loads(result['report']) if result['report'] else None
     if result['report'] and result['status']=='completed':
+        from atf.evidence import enrich
+        enrich(result['report'], job_id, DATA)
         result['report']['verification'] = verification(result['report'])
     return result
 
@@ -78,6 +98,10 @@ def process(job_id, files, skipped, run_tests, use_ai, source=None):
         with connection() as db:
             db.execute("UPDATE reports SET status='running' WHERE id=?", (job_id,))
         report = analyze(files)
+        source_folder = DATA / 'project-sources' / job_id
+        source_folder.mkdir(parents=True, exist_ok=True)
+        (source_folder / 'files.json').write_text(json.dumps(files), encoding='utf-8')
+        report['playwright'] = inspect_playwright(files)
         report['source'] = source or {'kind': 'zip'}
         report['skipped_files'] = skipped
         report['execution'] = execute_tests(files, run_tests)
@@ -167,17 +191,8 @@ def export(job_id: str, format: str = 'markdown'):
     if format == 'json':
         return Response(json.dumps(result, indent=2), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.json"'})
     if format != 'markdown': raise HTTPException(400, 'Choose markdown, json or pdf.')
-    r = result['report']
-    lines = [f"# ATF report: {result['name']}", f"Created: {result['created_at']}", '\n## Verification status', json.dumps(verification(r), indent=2), '\n## Analysis provenance', json.dumps({'analyzer_version':r.get('analyzer_version','legacy'), 'source_digest':r.get('source_digest','not recorded'), 'planning_coverage':r.get('planning_coverage',{'note':'Legacy report does not record omitted functions.'})},indent=2), '\n## Source', json.dumps(r.get('source', {'kind':'zip'})), '\n## Summary', json.dumps(r['summary'], indent=2), '\n## Architecture', json.dumps(r['architecture'], indent=2), '\n## Findings']
-    for f in r['findings']:
-        lines.append(f"- [{f['severity'].upper()}] {f['title']} â€” {f['file']}:{f['line']} ({f['rule']})\n  {f['recommendation']}")
-        lines.append(f"  Context: {f.get('context','not recorded')}; confidence: {f.get('confidence','not recorded')}. Evidence: {f.get('evidence','not recorded')}")
-    lines += ['\n## Execution', r['execution']['status'], r['execution']['detail'], '```text\n'+r['execution']['output']+'\n```', '\n## Proposed test cases']
-    for t in r['test_plan']:
-        lines.append(f"Location: {t['file']}:{t['line']}; basis: {t.get('basis','legacy generic template')}")
-        lines.append(f"- {t['id']} / {t['target']} / {t['category']}: {t['scenario']} Expected: {t['expected']} ({t['status']})")
-    lines += ['\n## Local AI review', r['ai']['status'], r['ai']['text'], '\n## Future scope', *['- '+s for s in r['future_scope']], '\n## Limitations', *['- '+s for s in r['limitations']]]
-    return Response('\n\n'.join(lines), media_type='text/markdown', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.md"'})
+    from atf.report_markdown import render as render_markdown
+    return Response(render_markdown(result), media_type='text/markdown', headers={'Content-Disposition': f'attachment; filename="atf-{job_id}.md"'})
 
 
 @app.get('/api/projects/{job_id}/tests')
