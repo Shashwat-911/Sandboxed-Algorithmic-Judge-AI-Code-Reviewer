@@ -85,6 +85,8 @@ def test_runner_contract_and_cleanup(code,expected):
 @pytest.fixture
 def api(tmp_path,monkeypatch):
     monkeypatch.setattr(main,'DB',tmp_path/'reports.db')
+    monkeypatch.setattr(main,'DATA',tmp_path)
+    monkeypatch.setattr(main.browser_api,'DATA',tmp_path/'browser-runs')
     with TestClient(main.app) as client: yield client
 
 def wait_report(api,id):

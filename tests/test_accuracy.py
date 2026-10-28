@@ -33,7 +33,8 @@ def test_contextual_plans_include_late_modules_and_no_test_helpers():
            'tests/test_helpers.py':'def helper(): pass'}
     r=analyze(files)
     assert r['planning_coverage']['eligible_functions']==91
-    assert r['planning_coverage']['omitted_functions']==11
+    assert r['planning_coverage']['omitted_functions']==0
+    assert r['planning_coverage']['selected_functions']==91
     assert any(t['target']=='Risk.size' and t['category']=='arithmetic boundary' for t in r['test_plan'])
     assert not any(t['file'].startswith('tests/') for t in r['test_plan'])
     assert all(t['basis'] for t in r['test_plan'])
