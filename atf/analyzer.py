@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 from atf.architecture import architecture
 from atf.planning import build_plan, project_scope
 
-LANGUAGES = {'.py':'Python','.js':'JavaScript','.jsx':'JavaScript','.ts':'TypeScript','.tsx':'TypeScript','.java':'Java','.cpp':'C++','.go':'Go','.rs':'Rust','.c':'C'}
+LANGUAGES = {'.py':'Python','.js':'JavaScript','.cjs':'JavaScript','.mjs':'JavaScript','.jsx':'JavaScript','.ts':'TypeScript','.mts':'TypeScript','.cts':'TypeScript','.tsx':'TypeScript','.java':'Java','.cpp':'C++','.go':'Go','.rs':'Rust','.c':'C'}
 
 
 def is_test(path):
