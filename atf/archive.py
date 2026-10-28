@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from atf.limits import MAX_UPLOAD, MAX_EXPANDED, MAX_SOURCE, MAX_FILE, MAX_ENTRIES, MIB
 SKIP = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', 'dist', 'build', '.next'}
 EXTENSIONS = {'.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.json', '.toml', '.yml', '.yaml', '.md', '.txt', '.html', '.css', '.sql', '.sh'}
+EXTENSIONS.update({'.cjs', '.mjs', '.cts', '.mts', '.csv', '.svg', '.xml', '.ini', '.cfg', '.lock'})
 
 def read_archive(data):
     stream = io.BytesIO(data) if isinstance(data, bytes) else data
