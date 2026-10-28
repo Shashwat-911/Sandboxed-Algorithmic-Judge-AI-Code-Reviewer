@@ -2,7 +2,7 @@
 from collections import defaultdict, deque
 
 
-def build_plan(symbols, findings, limit=80):
+def build_plan(symbols, findings, limit=None):
     candidates=[s for s in symbols if not s['is_test']]
     groups=defaultdict(list)
     def priority(s):
@@ -10,7 +10,7 @@ def build_plan(symbols, findings, limit=80):
     for s in sorted(candidates,key=lambda s:(priority(s),s['file'],s['line'])): groups[s['file']].append(s)
     queue=deque((name,deque(rows)) for name,rows in sorted(groups.items()))
     selected=[]
-    while queue and len(selected)<limit:
+    while queue and (limit is None or len(selected)<limit):
         name,rows=queue.popleft();selected.append(rows.popleft())
         if rows: queue.append((name,rows))
     plans=[]
