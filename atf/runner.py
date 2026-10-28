@@ -40,7 +40,9 @@ def execute_tests(files, enabled=False):
     if not enabled:
         return dict(status='not_requested', detail='Enable isolated tests to execute an existing Python unittest suite. No source was executed.', output='')
     if not any(p.rsplit('/', 1)[-1].startswith('test_') and p.endswith('.py') for p in files):
-        return dict(status='skipped', detail='No Python test_*.py suite found. Other test frameworks require a future runner.', output='')
+        browser_tests = [p for p in files if p.endswith(('.spec.js', '.spec.ts', '.test.js', '.test.ts'))]
+        detail = ('Found Playwright tests: ' + ', '.join(browser_tests[:12]) + '. ATF has not executed this imported suite. Run npm run test:e2e:all in the repository or inspect its GitHub Actions result.' if browser_tests else 'No Python test_*.py suite found. No tests were executed.')
+        return dict(status='skipped', detail=detail, output='')
     if sum(len(source.encode()) for source in files.values()) > 20 * 1024 * 1024 or len(files) > 2000:
         return dict(status='skipped', detail='Project exceeds the isolated runner budget (20 MB source / 2,000 files). Static analysis remains available.', output='')
     client = container = stream = None
