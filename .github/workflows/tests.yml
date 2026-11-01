@@ -9,6 +9,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements-demo.txt
+      - run: python -m playwright install --with-deps chromium
       - run: docker pull python:3.11-alpine
       - run: python -m pytest -q
         env:
