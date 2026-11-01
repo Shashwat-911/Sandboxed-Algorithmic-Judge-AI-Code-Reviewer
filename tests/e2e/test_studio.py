@@ -15,6 +15,7 @@ def wait_run(base, run_id):
 
 def test_workshop_journey_and_artifacts(page, live_server):
     page.goto(live_server)
+    page.locator('#pw-example').click()
     page.locator('#pw-run').click()
     expect(page.locator('#pw-notice')).to_contain_text('Journey passed', timeout=45000)
     expect(page.locator('#pw-progress')).to_contain_text('8/8 steps passed')
