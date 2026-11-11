@@ -1,6 +1,7 @@
 FROM python:3.12-slim-bookworm
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright ATF_PUBLIC_DEMO=1 ATF_DATA_DIR=/tmp/sandbox-data
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 && rm -rf /var/lib/apt/lists/*
 COPY requirements-demo.txt .
 RUN pip install --no-cache-dir -r requirements-demo.txt && python -m playwright install --with-deps chromium && chmod -R a+rX /ms-playwright
 COPY . .
