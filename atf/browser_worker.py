@@ -1,5 +1,6 @@
 """One fresh Playwright process and browser context per studio run."""
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -8,6 +9,9 @@ from atf.browser_commands import validate_url
 
 def run(folder):
     request = json.loads((folder / 'request.json').read_text(encoding='utf-8'))
+    public = os.getenv('ATF_PUBLIC_DEMO') == '1'
+    if public and (request.get('mode') != 'commands' or request.get('browser') != 'chromium'):
+        raise ValueError('Public worker accepts guided Chromium journeys only.')
     result = {'id': folder.name, 'status': 'running', 'project_id': request.get('project_id'),
               'browser': request['browser'], 'steps': [], 'console': [], 'network': [], 'artifacts': [],
               'created_at': request['created_at'], 'error': None}
@@ -36,7 +40,13 @@ def run(folder):
         with sync_playwright() as p:
             browser = getattr(p, request['browser']).launch(headless=True)
             context = browser.new_context(viewport={'width': 1280, 'height': 800}, accept_downloads=False)
-            context.route('**/*', lambda route: route.continue_() if route.request.url.startswith(('http://', 'https://')) else route.abort())
+            if public:
+                # No network access, even through redirects, subresources or user input.
+                workshop = (Path(__file__).resolve().parent.parent / 'static' / 'workshop.html').read_text(encoding='utf-8')
+                context.route('**/*', lambda route: route.fulfill(status=200, content_type='text/html', body=workshop) if route.request.url == 'https://sandbox-demo.invalid/workshop' else route.abort())
+                context.route_web_socket('**/*', lambda socket: socket.close())
+            else:
+                context.route('**/*', lambda route: route.continue_() if route.request.url.startswith(('http://', 'https://')) else route.abort())
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             page.set_default_timeout(5000)

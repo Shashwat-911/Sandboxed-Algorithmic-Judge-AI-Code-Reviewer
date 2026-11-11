@@ -7,7 +7,7 @@ import threading
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,10 +34,15 @@ DB = DATA / 'reports.sqlite3'
 POOL = ThreadPoolExecutor(max_workers=2)
 SLOTS = threading.BoundedSemaphore(6)
 
+@contextmanager
 def connection():
     conn = sqlite3.connect(DB, timeout=15)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 def initialize():
     with connection() as db:
